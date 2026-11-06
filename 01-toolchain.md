@@ -368,7 +368,8 @@ int main(void) {
 
 Флаги задаются один раз в интерфейсной цели системы сборки, а профили (`dev`, `asan`, `tsan`, `release`) отличаются параметрами; тогда набор из первых практик нельзя применить частично. В CMake четыре профиля задаются пресетами `CMakePresets.json` (`dev` с `CMAKE_C_FLAGS=-Werror`, `asan` и `tsan` с параметром `SANITIZE`, `release` с `CMAKE_BUILD_TYPE=Release`); `-Werror` кладут в пресеты разработки, а не в цель: поставляемые исходники его не получают.
 
-```cmake
+```text
+add_executable(demo main.c)
 add_library(project_flags INTERFACE)
 target_compile_definitions(project_flags INTERFACE _GNU_SOURCE)
 target_compile_options(project_flags INTERFACE -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Wformat=2)

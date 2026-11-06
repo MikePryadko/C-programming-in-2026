@@ -325,7 +325,7 @@ int main(void) {
 
 ### Строй цикл событий на неблокирующем вводе-выводе и poll
 
-Поток, блокирующийся в `read` на одном соединении, не обслужит остальные, поэтому дескрипторы переводят в неблокирующий режим (`O_NONBLOCK`), а ждёт готовности один вызов `poll` на все сразу. Неблокирующий `read` и `write` возвращают `-1` с `EAGAIN`, когда делать нечего: это не ошибка, а сигнал вернуться в `poll`. Состояние каждого соединения хранится в структуре и меняется конечным автоматом ([автомат](14-patterns.md)): читает, пока не получит данные, затем пишет, пока не отправит всё, затем снова читает; срок простоя считается на монотонных часах, а ожидание в `poll` ограничено ближайшим сроком. `poll` переносим между POSIX-системами; когда соединений тысячи, его заменяют бэкендами `epoll` (Linux), `kqueue` (BSD, macOS) и `IOCP` (Windows), а автомат соединения остаётся прежним. В примере `SOCK_NONBLOCK` и `SOCK_CLOEXEC` в `socketpair` и `CLOCK_MONOTONIC` расширения Linux.
+Поток, блокирующийся в `read` на одном соединении, не обслужит остальные, поэтому дескрипторы переводят в неблокирующий режим (`O_NONBLOCK`), а ждёт готовности один вызов `poll` на все сразу. Неблокирующий `read` и `write` возвращают `-1` с `EAGAIN`, когда делать нечего: это не ошибка, а сигнал вернуться в `poll`. Состояние каждого соединения хранится в структуре и меняется конечным автоматом ([автомат](14-patterns.md)): читает, пока не получит данные, затем пишет, пока не отправит всё, затем снова читает; срок простоя считается на монотонных часах, а ожидание в `poll` ограничено ближайшим сроком. `poll` переносим между POSIX-системами; когда соединений тысячи, его заменяют бэкендами `epoll` (Linux), `kqueue` (BSD, macOS) и `IOCP` (Windows), а автомат соединения остаётся прежним. В примере `SOCK_NONBLOCK` и `SOCK_CLOEXEC` в `socketpair` являются расширениями Linux (и BSD).
 
 Пример: эхо-сервер на трёх парах `socketpair`.
 
@@ -521,15 +521,17 @@ int pack(const char *name) {
 #include <spawn.h>
 #include <sys/wait.h>
 
-/* run - запускает prog (абсолютный путь) без оболочки и с пустым окружением. Возврат: код выхода или -1. */
+/* run - запускает prog (абсолютный путь) без оболочки и с пустым окружением.
+ * Возврат: код выхода (0 и больше), -E... при отказе, -ECANCELED если процесс убит сигналом. */
 int run(const char *prog, char *const argv[]) {
     pid_t pid;
     char *const envp[] = {nullptr};
-    if (posix_spawn(&pid, prog, nullptr, nullptr, argv, envp) != 0) return -1;
+    int e = posix_spawn(&pid, prog, nullptr, nullptr, argv, envp);
+    if (e != 0) return -e;
     int st;
     while (waitpid(pid, &st, 0) < 0)
-        if (errno != EINTR) return -1;
-    return WIFEXITED(st) ? WEXITSTATUS(st) : -1;
+        if (errno != EINTR) return -errno;
+    return WIFEXITED(st) ? WEXITSTATUS(st) : -ECANCELED;
 }
 ```
 
@@ -553,27 +555,33 @@ int run(const char *prog, char *const argv[]) {
 
 ```c
 #define _GNU_SOURCE
+#include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
+/* save_atomic - Возврат: 0 или -E...; при ошибке целевой файл не изменён. */
 int save_atomic(const char *dir, const char *name, const char *data, size_t n) {
     char tmp[256], dst[256];
     snprintf(tmp, sizeof tmp, "%s/.%s.XXXXXX", dir, name);
     snprintf(dst, sizeof dst, "%s/%s", dir, name);
     int fd = mkstemp(tmp);
-    if (fd < 0) return -1;
-    for (size_t off = 0; off < n;) {
+    if (fd < 0) return -errno;
+    int err = 0;
+    for (size_t off = 0; off < n && !err;) {
         ssize_t w = write(fd, data + off, n - off);
-        if (w < 0) { close(fd); unlink(tmp); return -1; }
-        off += (size_t)w;
+        if (w < 0) err = errno;
+        else off += (size_t)w;
     }
-    if (fsync(fd) != 0 || close(fd) != 0 || rename(tmp, dst) != 0) { unlink(tmp); return -1; }
+    if (!err && fsync(fd) != 0) err = errno;
+    if (close(fd) != 0 && !err) err = errno;
+    if (!err && rename(tmp, dst) != 0) err = errno;
+    if (err) { unlink(tmp); return -err; }
     int dfd = open(dir, O_RDONLY | O_DIRECTORY);
-    if (dfd < 0) return -1;
-    int rc = fsync(dfd);
+    if (dfd < 0) return -errno;
+    int rc = fsync(dfd) != 0 ? -errno : 0;
     close(dfd);
     return rc;
 }
